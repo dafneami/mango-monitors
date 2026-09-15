@@ -22,7 +22,7 @@ How it works:
     seconds; when an output appears or disappears the layout updates without
     losing the edits you've already made.
 
-Only depends on PyGObject (GTK4 + libadwaita). Everything else is stdlib.
+Only depends on PyGObject (GTK4). Everything else is stdlib.
 """
 
 import json
@@ -35,8 +35,7 @@ import sys
 import gi
 
 gi.require_version("Gtk", "4.0")
-gi.require_version("Adw", "1")
-from gi.repository import Adw, GLib, Gtk, Pango  # noqa: E402
+from gi.repository import Gdk, GLib, Gtk, Pango  # noqa: E402
 
 CONFIG = os.path.expanduser("~/.config/mango/config.conf")
 BEGIN = "# >>> mango-monitors (managed) — do not edit by hand >>>"
@@ -108,8 +107,6 @@ class Monitor:
 
     def rule_line(self):
         parts = [
-            # output names are simple (alnum + hyphen); anchor without escaping
-            # so the line matches mango's documented ^NAME$ regex style.
             f"name:^{self.name}$",
             f"width:{self.width}",
             f"height:{self.height}",
@@ -414,6 +411,155 @@ def normalize(monitors):
 
 
 # ----------------------------------------------------------------------------
+# GTK helpers — replacements for libadwaita widgets
+# ----------------------------------------------------------------------------
+
+class ActionRow(Gtk.Box):
+    """Replacement for Adw.ActionRow: title (+ optional subtitle) plus suffix."""
+
+    def __init__(self, title="", subtitle=None):
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        self.set_margin_top(8)
+        self.set_margin_bottom(8)
+        self.set_margin_start(12)
+        self.set_margin_end(12)
+
+        text_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        text_box.set_hexpand(True)
+        text_box.set_valign(Gtk.Align.CENTER)
+
+        self.title_label = Gtk.Label(label=title, xalign=0)
+        text_box.append(self.title_label)
+
+        self.subtitle_label = None
+        if subtitle:
+            self.subtitle_label = Gtk.Label(label=subtitle, xalign=0)
+            self.subtitle_label.add_css_class("dim-label")
+            self.subtitle_label.set_wrap(True)
+            text_box.append(self.subtitle_label)
+
+        self.append(text_box)
+
+    def add_suffix(self, widget):
+        widget.set_valign(Gtk.Align.CENTER)
+        self.append(widget)
+
+    def set_activatable_widget(self, widget):
+        # No-op without libadwaita; kept for API symmetry.
+        pass
+
+
+class PrefGroup(Gtk.Box):
+    """Replacement for Adw.PreferencesGroup: title + description + row list."""
+
+    def __init__(self, title="", description=None):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.set_margin_top(6)
+        self.set_margin_bottom(6)
+
+        self.title_label = Gtk.Label(label=title, xalign=0)
+        self.title_label.add_css_class("heading")
+        self.title_label.set_margin_start(6)
+        self.append(self.title_label)
+
+        self.desc_label = Gtk.Label(label=description or "", xalign=0)
+        self.desc_label.add_css_class("dim-label")
+        self.desc_label.set_wrap(True)
+        self.desc_label.set_margin_start(6)
+        self.desc_label.set_margin_end(6)
+        self.desc_label.set_visible(bool(description))
+        self.append(self.desc_label)
+
+        self.listbox = Gtk.ListBox()
+        self.listbox.add_css_class("boxed-list")
+        self.listbox.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.append(self.listbox)
+
+    def set_title(self, text):
+        self.title_label.set_label(text)
+
+    def set_description(self, text):
+        self.desc_label.set_label(text or "")
+        self.desc_label.set_visible(bool(text))
+
+    def add(self, child):
+        row = Gtk.ListBoxRow()
+        row.set_child(child)
+        row.set_activatable(False)
+        row.set_selectable(False)
+        self.listbox.append(row)
+
+
+class ConfirmDialog(Gtk.Window):
+    """Replacement for Adw.MessageDialog with two responses."""
+
+    def __init__(self, parent, heading, body):
+        super().__init__(transient_for=parent, modal=True)
+        self.set_title(heading)
+        self.set_default_size(420, -1)
+        self.set_resizable(False)
+
+        self._response_handler = None
+        self._responded = False
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        box.set_margin_top(24)
+        box.set_margin_bottom(24)
+        box.set_margin_start(24)
+        box.set_margin_end(24)
+
+        h = Gtk.Label(label=heading, xalign=0)
+        h.add_css_class("title-3")
+        h.set_wrap(True)
+        box.append(h)
+
+        self.body_label = Gtk.Label(label=body, xalign=0)
+        self.body_label.set_wrap(True)
+        box.append(self.body_label)
+
+        btn_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        btn_box.set_halign(Gtk.Align.END)
+        btn_box.set_margin_top(8)
+
+        revert_btn = Gtk.Button(label="Revert")
+        revert_btn.connect("clicked", lambda *_: self.respond("revert"))
+
+        keep_btn = Gtk.Button(label="Keep Changes")
+        keep_btn.add_css_class("suggested-action")
+        keep_btn.connect("clicked", lambda *_: self.respond("keep"))
+
+        btn_box.append(revert_btn)
+        btn_box.append(keep_btn)
+        box.append(btn_box)
+
+        self.set_child(box)
+        self.connect("close-request", self._on_close_request)
+
+    def _on_close_request(self, *_):
+        if not self._responded:
+            self._responded = True
+            h = self._response_handler
+            if h:
+                h("revert")
+        return False
+
+    def set_body(self, text):
+        self.body_label.set_label(text)
+
+    def connect_response(self, handler):
+        self._response_handler = handler
+
+    def respond(self, resp):
+        if self._responded:
+            return
+        self._responded = True
+        h = self._response_handler
+        if h:
+            h(resp)
+        self.close()
+
+
+# ----------------------------------------------------------------------------
 # Canvas — draggable monitor arrangement
 # ----------------------------------------------------------------------------
 
@@ -594,7 +740,7 @@ class Canvas(Gtk.DrawingArea):
 # Main window
 # ----------------------------------------------------------------------------
 
-class Window(Adw.ApplicationWindow):
+class Window(Gtk.ApplicationWindow):
     def __init__(self, app):
         super().__init__(application=app)
         self.app_ref = app
@@ -604,9 +750,10 @@ class Window(Adw.ApplicationWindow):
         self.monitors = discover()
         self.selected = next((m for m in self.monitors if m.enabled), None)
         self._updating = False
+        self._toast_timer = None
 
-        toolbar = Adw.ToolbarView()
-        header = Adw.HeaderBar()
+        # --- Header bar (replaces Adw.HeaderBar) ---
+        header = Gtk.HeaderBar()
 
         ident = Gtk.Button(label="Identify")
         ident.connect("clicked", self.on_identify)
@@ -629,9 +776,9 @@ class Window(Adw.ApplicationWindow):
         apply_btn.connect("clicked", self.on_apply)
         header.pack_end(apply_btn)
 
-        toolbar.add_top_bar(header)
+        self.set_titlebar(header)
 
-        # body: canvas on top, controls below
+        # --- Body: canvas on top, controls below ---
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
 
         self.canvas = Canvas(self)
@@ -655,11 +802,20 @@ class Window(Adw.ApplicationWindow):
         scroller.set_child(self.controls)
         body.append(scroller)
 
-        toolbar.set_content(body)
+        # --- Overlay holds the body + the toast label (replaces Adw.Toast) ---
+        overlay = Gtk.Overlay()
+        overlay.set_child(body)
 
-        self.toaster = Adw.ToastOverlay()
-        self.toaster.set_child(toolbar)
-        self.set_content(self.toaster)
+        self.toast_label = Gtk.Label()
+        self.toast_label.add_css_class("toast")
+        self.toast_label.set_halign(Gtk.Align.CENTER)
+        self.toast_label.set_valign(Gtk.Align.END)
+        self.toast_label.set_margin_bottom(20)
+        self.toast_label.set_visible(False)
+        overlay.add_overlay(self.toast_label)
+
+        self.set_child(overlay)
+
         self.refresh_fields()
 
         # Hotplug: poll the live output set so connecting/disconnecting a
@@ -669,30 +825,26 @@ class Window(Adw.ApplicationWindow):
         self._poll_id = GLib.timeout_add_seconds(2, self.poll_outputs)
 
     def build_controls(self):
-        clamp = Adw.Clamp()
-        clamp.set_maximum_size(720)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         box.set_margin_top(12)
         box.set_margin_bottom(16)
         box.set_margin_start(12)
         box.set_margin_end(12)
 
-        group = Adw.PreferencesGroup()
+        group = PrefGroup("Selected monitor")
         self.group_title = group
-        group.set_title("Selected monitor")
 
         self.enabled_sw = Gtk.Switch(valign=Gtk.Align.CENTER)
         self.enabled_sw.connect("notify::active", self.on_enabled)
-        row = Adw.ActionRow(title="Enabled")
+        row = ActionRow(title="Enabled")
         row.add_suffix(self.enabled_sw)
-        row.set_activatable_widget(self.enabled_sw)
         group.add(row)
 
         # resolution
         self.res_combo = Gtk.DropDown.new_from_strings([])
         self.res_combo.set_valign(Gtk.Align.CENTER)
         self.res_combo.connect("notify::selected", self.on_res)
-        rr = Adw.ActionRow(title="Resolution")
+        rr = ActionRow(title="Resolution")
         rr.add_suffix(self.res_combo)
         group.add(rr)
 
@@ -701,7 +853,7 @@ class Window(Adw.ApplicationWindow):
         self.refresh_spin.set_digits(3)
         self.refresh_spin.set_valign(Gtk.Align.CENTER)
         self.refresh_spin.connect("value-changed", self.on_refresh)
-        rfr = Adw.ActionRow(title="Refresh (Hz)")
+        rfr = ActionRow(title="Refresh (Hz)")
         rfr.add_suffix(self.refresh_spin)
         group.add(rfr)
 
@@ -711,7 +863,7 @@ class Window(Adw.ApplicationWindow):
         self.scale_spin.set_value(1.0)
         self.scale_spin.set_valign(Gtk.Align.CENTER)
         self.scale_spin.connect("value-changed", self.on_scale)
-        sc = Adw.ActionRow(title="Scale")
+        sc = ActionRow(title="Scale")
         sc.add_suffix(self.scale_spin)
         group.add(sc)
 
@@ -720,18 +872,17 @@ class Window(Adw.ApplicationWindow):
             [lbl for _, lbl in TRANSFORMS])
         self.rot_combo.set_valign(Gtk.Align.CENTER)
         self.rot_combo.connect("notify::selected", self.on_rot)
-        rt = Adw.ActionRow(title="Rotation")
+        rt = ActionRow(title="Rotation")
         rt.add_suffix(self.rot_combo)
         group.add(rt)
 
         # vrr
         self.vrr_sw = Gtk.Switch(valign=Gtk.Align.CENTER)
         self.vrr_sw.connect("notify::active", self.on_vrr)
-        vr = Adw.ActionRow(
+        vr = ActionRow(
             title="Variable refresh (VRR)",
             subtitle="Adaptive sync / FreeSync, if the panel supports it")
         vr.add_suffix(self.vrr_sw)
-        vr.set_activatable_widget(self.vrr_sw)
         group.add(vr)
 
         # position (editable, also set by dragging)
@@ -740,9 +891,9 @@ class Window(Adw.ApplicationWindow):
         for sp, cb in ((self.posx, self.on_posx), (self.posy, self.on_posy)):
             sp.set_valign(Gtk.Align.CENTER)
             sp.connect("value-changed", cb)
-        px = Adw.ActionRow(title="Position X")
+        px = ActionRow(title="Position X")
         px.add_suffix(self.posx)
-        py = Adw.ActionRow(title="Position Y")
+        py = ActionRow(title="Position Y")
         py.add_suffix(self.posy)
         group.add(px)
         group.add(py)
@@ -750,25 +901,24 @@ class Window(Adw.ApplicationWindow):
         box.append(group)
 
         # custom mode entry
-        cgroup = Adw.PreferencesGroup()
-        cgroup.set_title("Custom mode")
-        cgroup.set_description(
-            "If your resolution isn't listed, type it here. mango will request "
-            "a custom mode (may not work on every panel).")
+        cgroup = PrefGroup(
+            "Custom mode",
+            "If your resolution isn't listed, type it here. mango will "
+            "request a custom mode (may not work on every panel).")
         self.custom_entry = Gtk.Entry()
         self.custom_entry.set_placeholder_text("e.g. 2560x1440@144")
         self.custom_entry.set_valign(Gtk.Align.CENTER)
+        self.custom_entry.set_hexpand(True)
         apply_custom = Gtk.Button(label="Set")
         apply_custom.set_valign(Gtk.Align.CENTER)
         apply_custom.connect("clicked", self.on_custom)
-        crow = Adw.ActionRow(title="Mode")
+        crow = ActionRow(title="Mode")
         crow.add_suffix(self.custom_entry)
         crow.add_suffix(apply_custom)
         cgroup.add(crow)
         box.append(cgroup)
 
-        clamp.set_child(box)
-        return clamp
+        return box
 
     # --- selection / field sync ---
     def select(self, mon):
@@ -797,6 +947,7 @@ class Window(Adw.ApplicationWindow):
         m = self.selected
         if m is None:
             self.group_title.set_title("No monitor selected")
+            self.group_title.set_description("")
             self._updating = False
             return
         self.group_title.set_title(m.name)
@@ -935,24 +1086,14 @@ class Window(Adw.ApplicationWindow):
         except Exception as e:
             self.toast(f"Write failed: {e}")
             return
-        # snapshot for revert (the file we just overwrote's prior managed block
-        # is gone, but a full backup exists; for revert we restore previous
-        # in-memory geometry by re-discovering before apply)
         apply_live(self.monitors)
         self.confirm_keep()
 
     def confirm_keep(self):
-        dialog = Adw.MessageDialog(
-            transient_for=self,
-            heading="Keep this arrangement?",
-            body="Reverting in 15 seconds if you don't confirm.",
-        )
-        dialog.add_response("revert", "Revert")
-        dialog.add_response("keep", "Keep Changes")
-        dialog.set_response_appearance("keep",
-                                       Adw.ResponseAppearance.SUGGESTED)
-        dialog.set_default_response("keep")
-        dialog.set_close_response("revert")
+        dialog = ConfirmDialog(
+            self,
+            "Keep this arrangement?",
+            "Reverting in 15 seconds if you don't confirm.")
 
         state = {"id": None, "left": 15}
 
@@ -961,21 +1102,21 @@ class Window(Adw.ApplicationWindow):
             dialog.set_body(
                 f"Reverting in {state['left']} seconds if you don't confirm.")
             if state["left"] <= 0:
-                dialog.response("revert")
+                state["id"] = None
+                dialog.respond("revert")
                 return False
             return True
 
         state["id"] = GLib.timeout_add_seconds(1, tick)
 
-        def on_resp(dlg, resp):
-            if state["id"]:
+        def on_resp(resp):
+            if state["id"] is not None:
                 GLib.source_remove(state["id"])
                 state["id"] = None
             if resp == "revert":
                 self.revert()
-            dlg.destroy()
 
-        dialog.connect("response", on_resp)
+        dialog.connect_response(on_resp)
         dialog.present()
 
     def revert(self):
@@ -993,9 +1134,18 @@ class Window(Adw.ApplicationWindow):
 
     def toast(self, text):
         try:
-            self.toaster.add_toast(Adw.Toast.new(text))
+            self.toast_label.set_label(text)
+            self.toast_label.set_visible(True)
+            if self._toast_timer is not None:
+                GLib.source_remove(self._toast_timer)
+            self._toast_timer = GLib.timeout_add_seconds(3, self._hide_toast)
         except Exception:
             print(text, file=sys.stderr)
+
+    def _hide_toast(self):
+        self.toast_label.set_visible(False)
+        self._toast_timer = None
+        return False
 
     # --- hotplug ---
     def poll_outputs(self, force=False):
@@ -1059,9 +1209,35 @@ def discover_previous():
     return _PREVIOUS if _PREVIOUS else discover()
 
 
-class App(Adw.Application):
+# ----------------------------------------------------------------------------
+# Application
+# ----------------------------------------------------------------------------
+
+TOAST_CSS = b"""
+.toast {
+    background-color: rgba(0, 0, 0, 0.85);
+    color: white;
+    padding: 8px 16px;
+    border-radius: 8px;
+}
+"""
+
+
+class App(Gtk.Application):
     def __init__(self):
         super().__init__(application_id="io.github.slapah.MangoMonitors")
+
+    def do_startup(self):
+        Gtk.Application.do_startup(self)
+        css = Gtk.CssProvider()
+        try:
+            css.load_from_data(TOAST_CSS)
+        except Exception:
+            pass
+        display = Gdk.Display.get_default()
+        if display is not None:
+            Gtk.StyleContext.add_provider_for_display(
+                display, css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
     def do_activate(self):
         win = Window(self)
