@@ -10,21 +10,22 @@ How it works:
 
   * Discovery reads `wlr-randr` for the live state of every output (modes,
     position, scale, transform, adaptive sync) and falls back to `wayland-info`
-    if wlr-randr isn't installed. Output names come from `mmsg -O`.
+    if wlr-randr isn't installed. Output names come from `mmsg get all-monitors`.
   * Saving writes a managed block of `monitorrule=` lines into
     ~/.config/mango/config.conf, between a pair of marker comments, and backs
     the file up the first time it touches it.
-  * Apply runs `mmsg -s -d reload_config`, which makes mango re-read the config
-    and commit the new geometry. Disabled outputs are turned off with
-    `mmsg -s -d disable_monitor,NAME` and persisted as a small exec-once line so
-    they stay off after a restart.
-  * Hotplugging is handled by polling `mmsg -O` every couple of seconds; when an
-    output appears or disappears the layout updates without losing the edits
-    you've already made.
+  * Apply runs `mmsg dispatch reload_config`, which makes mango re-read the
+    config and commit the new geometry. Disabled outputs are turned off with
+    `mmsg dispatch disable_monitor,NAME` and persisted as a small exec-once
+    line so they stay off after a restart.
+  * Hotplugging is handled by polling `mmsg get all-monitors` every couple of
+    seconds; when an output appears or disappears the layout updates without
+    losing the edits you've already made.
 
 Only depends on PyGObject (GTK4 + libadwaita). Everything else is stdlib.
 """
 
+import json
 import os
 import re
 import shutil
@@ -129,7 +130,13 @@ class Monitor:
 # ----------------------------------------------------------------------------
 
 def output_names():
-    return [n.strip() for n in run(["mmsg", "-O"]).splitlines() if n.strip()]
+    """Return list of output names using the new IPC."""
+    out = run(["mmsg", "get", "all-monitors"])
+    try:
+        data = json.loads(out)
+        return [m["name"] for m in data.get("monitors", [])]
+    except Exception:
+        return []
 
 
 def discover():
@@ -199,7 +206,7 @@ def parse_wlr_randr():
 
 
 def discover_map():
-    names = output_names()  # mango's view (mmsg -O)
+    names = output_names()  # mango's view (mmsg get all-monitors)
     parsed = parse_wlr_randr()
     # union: trust wlr-randr's list, but keep anything mmsg reported too
     all_names = list(dict.fromkeys(names + list(parsed.keys())))
@@ -356,7 +363,7 @@ def build_block(monitors):
         if not m.enabled:
             # persist disable across restarts; small delay so output exists
             lines.append(
-                f"exec-once=sh -c 'sleep 1; mmsg -s -d disable_monitor,{m.name}'"
+                f"exec-once=sh -c 'sleep 1; mmsg dispatch disable_monitor,{m.name}'"
             )
     lines.append(END)
     return "\n".join(lines) + "\n"
@@ -383,13 +390,14 @@ def write_config(monitors):
 
 
 def apply_live(monitors):
+    """Apply live changes using the new mmsg dispatch syntax."""
     for m in monitors:
         if m.enabled:
-            run(["mmsg", "-s", "-d", f"enable_monitor,{m.name}"])
-    run(["mmsg", "-s", "-d", "reload_config"])
+            run(["mmsg", "dispatch", f"enable_monitor,{m.name}"])
+    run(["mmsg", "dispatch", "reload_config"])
     for m in monitors:
         if not m.enabled:
-            run(["mmsg", "-s", "-d", f"disable_monitor,{m.name}"])
+            run(["mmsg", "dispatch", f"disable_monitor,{m.name}"])
 
 
 def normalize(monitors):
